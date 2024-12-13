@@ -15,9 +15,11 @@ fi
 # Check Python version
 PYTHON_VERSION=$($PYTHON -c "import sys; print('.'.join(map(str, sys.version_info[:2])))")
 REQUIRED_VERSION="3.7"
-if [[ $(echo "$PYTHON_VERSION < $REQUIRED_VERSION" | bc) -eq 1 ]]; then
-  echo "Error: Python 3.7 or higher is required. Detected version: $PYTHON_VERSION"
-  exit 1
+if python3 -c "import sys; sys.exit(0) if sys.version_info >= (3,7) else sys.exit(1)" ; then
+    :
+else
+    echo "Error: Python 3.7 or higher is required. Detected version: $PYTHON_VERSION"
+    exit 1
 fi
 echo "Found Python version $PYTHON_VERSION."
 
@@ -74,11 +76,14 @@ PG_CONFIG = $PG_CONFIG
 PGXS := \$(shell \$(PG_CONFIG) --pgxs)
 include \$(PGXS)
 
-# Link against Python library
-SHLIB_LINK = -lpython3
-CFLAGS += -I/usr/include/python3
+# Link against Python library using python3-config
+PYTHON_INCLUDE = \$(shell python3-config --includes)
+PYTHON_LIBS = \$(shell python3-config --ldflags)
 
-# Set parallel workers
+CFLAGS += \$(PYTHON_INCLUDE)
+LDFLAGS += \$(PYTHON_LIBS)
+
+# Define parallel workers
 CPPFLAGS += -DPG_PANDAS_PARALLEL=$PG_PANDAS_PARALLEL
 EOF
 

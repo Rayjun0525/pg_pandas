@@ -64,8 +64,6 @@ _PG_init(void)
         LWLockInitialize(&pandas_shared->lock, LWLockNewTrancheId());
     }
 
-    pq_init_shared_memory();
-
     if (!process_shared_preload_libraries_in_progress)
     {
         elog(ERROR, "pg_pandas must be loaded via shared_preload_libraries");
