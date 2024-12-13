@@ -14,6 +14,7 @@
 #include "storage/shmem.h"
 #include "storage/lwlock.h"
 #include "miscadmin.h"
+#include "utils/guc.h"
 
 #include <string.h>
 
@@ -51,19 +52,6 @@ _PG_init(void)
                             NULL, NULL, NULL);
 
     /* Allocate shared memory */
-    pq_init_shared_memory();
-
-    if (!process_shared_preload_libraries_in_progress)
-    {
-        elog(ERROR, "pg_pandas must be loaded via shared_preload_libraries");
-    }
-
-    if (pg_pandas_parallel < 1 || pg_pandas_parallel > 16)
-    {
-        elog(ERROR, "pg_pandas.parallel must be between 1 and 16");
-    }
-
-    /* Initialize shared memory */
     bool found;
     pandas_shared = (PandasSharedData *) ShmemInitStruct("pg_pandas_shared",
                                                          sizeof(PandasSharedData),
@@ -74,6 +62,18 @@ _PG_init(void)
         /* Initialize shared memory */
         memset(pandas_shared, 0, sizeof(PandasSharedData));
         LWLockInitialize(&pandas_shared->lock, LWLockNewTrancheId());
+    }
+
+    pq_init_shared_memory();
+
+    if (!process_shared_preload_libraries_in_progress)
+    {
+        elog(ERROR, "pg_pandas must be loaded via shared_preload_libraries");
+    }
+
+    if (pg_pandas_parallel < 1 || pg_pandas_parallel > 16)
+    {
+        elog(ERROR, "pg_pandas.parallel must be between 1 and 16");
     }
 }
 
