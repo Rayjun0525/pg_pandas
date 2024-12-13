@@ -1,0 +1,6 @@
+# pg_pandas.control
+
+comment = 'PostgreSQL extension to apply any Pandas operation using a background worker'
+default_version = '1.0'
+relocatable = true
+module_pathname = '$libdir/pg_pandas'

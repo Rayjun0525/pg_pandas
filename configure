@@ -1,0 +1,73 @@
+#!/bin/bash
+
+# configure
+# This script checks for required dependencies and generates the Makefile.
+
+echo "Configuring pg_pandas extension..."
+
+# Check for Python3
+PYTHON=$(which python3)
+if [ -z "$PYTHON" ]; then
+  echo "Error: Python3 is not installed or not in PATH."
+  exit 1
+fi
+
+# Check Python version
+PYTHON_VERSION=$($PYTHON -c "import sys; print('.'.join(map(str, sys.version_info[:2])))")
+REQUIRED_VERSION="3.7"
+if [[ $(echo "$PYTHON_VERSION < $REQUIRED_VERSION" | bc) -eq 1 ]]; then
+  echo "Error: Python 3.7 or higher is required. Detected version: $PYTHON_VERSION"
+  exit 1
+fi
+echo "Found Python version $PYTHON_VERSION."
+
+# Check for Pandas
+if ! $PYTHON -c "import pandas" 2>/dev/null; then
+  echo "Error: Pandas is not installed."
+  exit 1
+fi
+echo "Pandas is installed."
+
+# Check for pg_config
+PG_CONFIG=$(which pg_config)
+if [ -z "$PG_CONFIG" ]; then
+  echo "Error: pg_config not found. Install PostgreSQL development files."
+  exit 1
+fi
+echo "Found pg_config at $PG_CONFIG."
+
+# Get PostgreSQL version
+PG_VERSION=$($PG_CONFIG --version)
+echo "PostgreSQL version: $PG_VERSION"
+
+# Generate Makefile
+echo "Generating Makefile..."
+cat <<EOF > Makefile
+# Makefile for pg_pandas extension
+
+EXTENSION = pg_pandas
+MODULES = pg_pandas pg_pandas_worker
+DATA = pg_pandas--1.0.sql
+PG_CONFIG = $PG_CONFIG
+PGXS := \$(shell \$(PG_CONFIG) --pgxs)
+include \$(PGXS)
+
+# Link against Python library
+SHLIB_LINK = -lpython3
+CFLAGS += -I/usr/include/python3
+EOF
+
+echo "Makefile generated successfully."
+
+# Test Pandas installation
+echo "Testing Pandas installation..."
+TEST_SCRIPT=$(mktemp)
+cat <<EOF > $TEST_SCRIPT
+import pandas as pd
+print("Pandas test passed. Version:", pd.__version__)
+EOF
+
+$PYTHON $TEST_SCRIPT || { echo "Error: Pandas test failed."; rm $TEST_SCRIPT; exit 1; }
+rm $TEST_SCRIPT
+
+echo "Configuration completed successfully."
