@@ -10,3 +10,6 @@ include $(PGXS)
 # Link against Python library
 SHLIB_LINK = -lpython3
 CFLAGS += -I/usr/include/python3
+
+# Define parallel workers
+CPPFLAGS += -DPG_PANDAS_PARALLEL=$(PG_PANDAS_PARALLEL)

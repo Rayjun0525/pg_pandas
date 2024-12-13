@@ -1,15 +1,16 @@
 # pg_pandas: PostgreSQL + Pandas Extension
 
-`pg_pandas` is a PostgreSQL extension that integrates the powerful data processing capabilities of Pandas directly into PostgreSQL. Leveraging a background worker, this extension allows you to execute Pandas operations on SQL query results efficiently and return the processed data as PostgreSQL tuples.
+`pg_pandas` is an extension for PostgreSQL that integrates the powerful data processing capabilities of Pandas directly within PostgreSQL. It leverages background workers to efficiently execute Pandas operations on SQL query results and return the processed data as PostgreSQL tuples.
 
 ---
 
 ## Features
 
-- **Pandas Integration**: Apply any Pandas operation on SQL data directly within PostgreSQL.
-- **Background Worker**: Maintains a persistent Python environment for efficient processing.
-- **Flexible Input**: Accepts subqueries or direct values as input data.
-- **JSON Support**: Handles JSON data for seamless data exchange between PostgreSQL and Pandas.
+- **Pandas Integration**: Apply Pandas operations directly to SQL data.
+- **Background Worker**: Utilize persistent Python environments within background workers for efficient processing.
+- **Flexible Input**: Supports both subqueries and direct values as input data.
+- **JSON Support**: Uses JSON for seamless data serialization between PostgreSQL and Pandas.
+- **Parallel Workers**: Supports multiple background workers to handle concurrent Pandas operations.
 
 ---
 
@@ -20,167 +21,167 @@
 - **PostgreSQL**: Version 12 or higher.
 - **Python**: Version 3.7 or higher.
 - **Pandas**: Install via `pip install pandas`.
-- **cJSON**: Install the cJSON library (e.g., `sudo apt-get install libcjson-dev` on Debian-based systems).
+- **cJSON**: For example, on Debian-based systems, install using `sudo apt-get install libcjson-dev`.
 
 ### Steps
 
-1. **Clone the Repository**
+1. **Clone Repository**
+    ```bash
+    git clone https://github.com/yourusername/pg_pandas.git
+    cd pg_pandas
+    ```
 
-   ```bash
-   git clone https://github.com/yourusername/pg_pandas.git
-   cd pg_pandas
-   ```
+2. **Run Configuration Script**
+    ```bash
+    ./configure
+    ```
+    - This script checks for Python3, Pandas, and PostgreSQL development files, then generates the Makefile.
+    - By default, it uses the `$PGDATA/postgresql.conf` path, but you can specify a custom path as an argument:
+    ```bash
+    ./configure /path/to/your/postgresql/data
+    ```
 
-2. Run the Configuration Script
+3. **Compile and Install**
+    ```bash
+    make
+    sudo make install
+    ```
 
-  ```bash
-  ./configure
-  ```
-  
-  This script checks for Python3, Pandas, and PostgreSQL development files, then generates the Makefile.
+4. **Configure PostgreSQL**
+    - **Load Extension**
+        Add the extension to PostgreSQL's `shared_preload_libraries` in `postgresql.conf`:
+        ```conf
+        shared_preload_libraries = 'pg_pandas'
+        ```
+    - **Restart PostgreSQL**
+        ```bash
+        sudo service postgresql restart
+        ```
+    - **Create Extension**
+        ```sql
+        CREATE EXTENSION pg_pandas;
+        ```
 
-3. Compile and Install
+5. **Allocate Shared Memory**
+    Ensure that PostgreSQL has sufficient shared memory allocated. Modify `postgresql.conf` if necessary:
+    ```conf
+    shared_buffers = 256MB
+    ```
 
-  ```bash
-  make
-  sudo make install
-  ```
-4. Configure PostgreSQL
-
-  Ensure that the shared library path is included in PostgreSQL's `shared_preload_libraries`. Add the following line to your `postgresql.conf`:
-
-  ```conf
-  shared_preload_libraries = 'pg_pandas'
-  ```
-  Note: This requires a PostgreSQL server restart.
-
-5. Create the Extension in PostgreSQL
-
-  ```sql
-  CREATE EXTENSION pg_pandas;
-  ```
+6. **Set Parallel Workers**
+    Configure the number of parallel workers by setting `pg_pandas.parallel` in `postgresql.conf`:
+    ```conf
+    pg_pandas.parallel = 4  # Example: 4 parallel workers
+    ```
+    > **Note:** Adjust the number based on your system's CPU and memory resources.
 
 ---
 
 ## Usage
 
-### Basic Usage
+### Applying Pandas Operations
 
-1. Applying a Pandas Operation on a Subquery
+You can use the `pandas` function to apply Pandas operations on SQL query results. Here's how you can use it:
 
-  ```sql
-  SELECT * FROM pandas(
-    (SELECT id, value FROM your_table WHERE status = 'active'),
-    'lambda df: df[df["value"] > 10]'
-  ) AS t(id int, value float8);
-  ```
+1. **Basic Aggregation**
+    ```sql
+    SELECT * FROM pandas(
+      (SELECT * FROM sales_data),
+      'lambda df: df.groupby("region").sum().reset_index()'
+    ) AS t(region text, total_sales float8);
+    ```
 
-2. Applying a Pandas Operation on Direct Values
+2. **Dataframe Merging**
+    ```sql
+    SELECT * FROM pandas(
+      (SELECT * FROM table1),
+      'lambda df1: df1.merge(pd.read_json(\'[{"id": 1, "extra": "A"}, {"id": 2, "extra": "B"}]\'), on="id")'
+    ) AS t(id int, column1 text, extra text);
+    ```
 
-  ```sql
-  -- Single Value
-  SELECT * FROM pandas(
-    42,
-    'lambda df: pd.DataFrame({"result": [df + 10]})'
-  ) AS t(result int);
+3. **Time Series Resampling**
+    ```sql
+    SELECT * FROM pandas(
+      (SELECT timestamp, value FROM timeseries_data),
+      'lambda df: df.set_index("timestamp").resample("1D").sum().reset_index()'
+    ) AS t(timestamp timestamp, total_value float8);
+    ```
 
-  -- JSON Array
-  SELECT * FROM pandas(
-    '[{"id": 1, "value": 10}, {"id": 2, "value": 20}]',
-    'lambda df: df[df["value"] > 15]'
-  ) AS t(id int, value float8);
-  ```
+---
 
-### Advanced Usage
+## Configuration
 
-1. GroupBy and Aggregation
+### pg_pandas.parallel
 
-  ```sql
-  SELECT * FROM pandas(
-    (SELECT category, amount FROM sales),
-    'lambda df: df.groupby("category").sum().reset_index()'
-  ) AS t(category text, total_amount float8);
-  ```
-  
-2. Adding a New Column
+The `pg_pandas.parallel` parameter controls the number of parallel background workers that `pg_pandas` uses to handle concurrent Pandas operations. Adjusting this parameter allows you to optimize performance based on your system's capabilities.
 
-  ```sql
-  SELECT * FROM pandas(
-    (SELECT id, value FROM your_table),
-    'lambda df: df.assign(new_col=df["value"] * 2)'
-  ) AS t(id int, value float8, new_col float8);
-  ```
+- **Type:** `integer`
+- **Range:** `1` to `1024`
+- **Default:** `1`
 
-3. Merging DataFrames
+**Example Setting:**
 
-  ```sql
-  SELECT * FROM pandas(
-    (SELECT * FROM table1),
-    'lambda df1: df1.merge(pd.read_json(\'[{"id": 1, "extra": "A"}, {"id": 2, "extra": "B"}]\'), on="id")'
-  ) AS t(id int, column1 text, extra text);
-  ```
+```conf
+# postgresql.conf
 
-4. Time Series Resampling
+# pg_pandas settings
+pg_pandas.parallel = 4  # Activate 4 parallel workers
+```
 
-  ```sql
-  SELECT * FROM pandas(
-    (SELECT timestamp, value FROM timeseries_data),
-    'lambda df: df.set_index("timestamp").resample("1D").sum().reset_index()'
-  ) AS t(timestamp timestamp, total_value float8);
-  ```
+
+> **Caution:** Increasing the number of parallel workers will consume more system resources. Ensure that your system has sufficient CPU and memory to handle the specified number of workers.
 
 ---
 
 ## Internal Workings
-1. Background Worker:
 
-* Upon PostgreSQL server start, the background worker initializes a persistent Python environment with Pandas loaded.
-* It listens for data and operations sent from the main PostgreSQL backend.
+1. **Background Worker Initialization:**
+   - When PostgreSQL starts, `pg_pandas` initializes multiple background workers based on the `pg_pandas.parallel` setting.
+   - Each worker connects to a shared memory segment to listen for incoming Pandas operation tasks.
 
-2. SQL Function `pandas(data, operation)`:
+2. **Data Processing Flow:**
+   - When a user invokes the `pandas` function, the input data is serialized to JSON and stored in shared memory along with the specified Pandas operation.
+   - An available background worker picks up the task, executes the Pandas operation within a restricted Python environment, and serializes the result back to JSON.
+   - The processed data is then returned to PostgreSQL as a set of tuples.
 
-* `data`: Can be a subquery result or direct values, automatically converted to JSON.
-* `operation`: A Python lambda function string that defines the Pandas operation to perform on the data.
-
-3. Data Flow:
-
-* The `pandas` function sends the JSON-serialized data and operation to the background worker via shared memory.
-* The background worker processes the data using Pandas and returns the result as a JSON string.
-* The main PostgreSQL backend parses the JSON result and returns it as a set of records.
+3. **Memory Management:**
+   - Utilizes PostgreSQL's shared memory (`ShmemInitStruct`) and lightweight locks (`LWLock`) to manage synchronization between the main backend process and background workers.
+   - Employs memory contexts (`MemoryContext`) to efficiently handle memory allocation and cleanup.
+   - Python environments within workers are persistent to minimize initialization overhead.
 
 ---
 
 ## Memory Management
 
-* **Shared Memory**: Utilizes PostgreSQL's shared memory (`ShmemInitStruct`) to facilitate communication between the backend and the background worker.
-
-* **Locks**: Employs `LWLock` to ensure synchronized access to shared memory structures, preventing race conditions.
-
-* **Memory Contexts**: Allocates memory within PostgreSQL's memory contexts (`palloc`) to ensure proper memory management and cleanup.
-
-* **Python Environment**: The background worker maintains a persistent Python environment, reducing the overhead of initializing Python for each operation.
-* **Data Handling**: Ensures that all data passed between PostgreSQL and Python is serialized/deserialized appropriately to prevent memory leaks and ensure data integrity.
+- **Shared Memory:** Uses PostgreSQL's shared memory to facilitate communication between backend processes and background workers.
+- **Locks:** Employs `LWLock` to synchronize access to shared memory structures, preventing race conditions.
+- **Memory Contexts:** Utilizes PostgreSQL's memory contexts (`palloc`) for efficient memory allocation and management.
+- **Python Environment:** Maintains a persistent Python environment within each background worker to minimize initialization overhead.
+- **Data Handling:** Uses JSON for efficient serialization and deserialization between PostgreSQL and Python's Pandas.
 
 ---
 
 ## Limitations and Considerations
-1. Security:
 
-* The `operation` parameter executes arbitrary Python code. Ensure that only trusted users can execute this function to prevent security risks.
-* Consider implementing a whitelist of allowed operations or sandboxing the Python execution environment.
+1. **Security:**
+   - The `operation` parameter allows arbitrary Python code execution, posing potential security risks.
+   - **Mitigation:**
+     - The `initialize_secure_python` function restricts the execution environment to specific Python modules (`pandas`, `numpy`, `json`) and limits built-in functions (`print`, `len`, `range`).
+     - **Recommendation:** Ensure that only trusted users have the necessary permissions to execute the `pandas` function.
 
-2. Performance:
+2. **Performance:**
+   - Large datasets can increase memory usage and processing time.
+   - Optimize data sizes and Pandas operations to maintain performance.
+   - Adjust the `pg_pandas.parallel` parameter to balance concurrency and resource utilization based on your system's capabilities.
 
-* Large datasets may lead to high memory usage. Monitor and optimize the size of data being processed.
-* Network latency is minimal as the processing occurs within the PostgreSQL server, but Python execution speed should be considered.
+3. **Error Handling:**
+   - Errors during Python code execution are logged in PostgreSQL's error logs.
+   - Implement comprehensive logging and monitoring to effectively track and resolve issues.
 
-3. Error Handling:
-
-* Errors in Python code will propagate back to PostgreSQL. Ensure proper error handling and logging mechanisms are in place.
-
-4. Concurrency:
-
-* The current implementation assumes a single background worker. For high concurrency, consider extending the implementation to support multiple workers.
+4. **Concurrency:**
+   - Supports multiple background workers to handle concurrent Pandas operations.
+   - Adjust the `pg_pandas.parallel` parameter to balance between performance gains and resource utilization.
+   - Single-worker configurations may lead to bottlenecks under high concurrency; utilizing multiple workers can alleviate this.
 
 ---
 

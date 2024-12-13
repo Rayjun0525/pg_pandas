@@ -14,6 +14,7 @@
 
 #include <unistd.h>
 #include <string.h>
+#include <signal.h>
 
 #include <Python.h>
 #include <cjson/cJSON.h>
@@ -26,6 +27,7 @@ typedef struct {
     char operation[2048];
     char result[65536];
     bool ready;
+    bool terminate;
     LWLock lock;
 } PandasSharedData;
 
@@ -37,25 +39,56 @@ void _PG_init(void);
 void pg_pandas_worker_main(Datum main_arg);
 static void process_pandas_operation(void);
 
+/* List of allowed Python modules */
+const char *allowed_modules[] = {"pandas", "numpy", "json", NULL};
+
+/* Signal handler for shutdown */
+static void
+handle_shutdown(SIGNAL_ARGS)
+{
+    int save_errno = errno;
+    if (pandas_shared != NULL)
+    {
+        LWLockAcquire(&pandas_shared->lock, LW_EXCLUSIVE);
+        pandas_shared->terminate = true;
+        LWLockRelease(&pandas_shared->lock);
+    }
+    errno = save_errno;
+}
+
+/* Initialize secure Python environment */
+static void initialize_secure_python(void) {
+    Py_Initialize();
+
+    /* Import only allowed modules */
+    for (int i = 0; allowed_modules[i] != NULL; i++) {
+        PyRun_SimpleString("import sys");
+        char import_command[256];
+        snprintf(import_command, sizeof(import_command), "import %s", allowed_modules[i]);
+        PyRun_SimpleString(import_command);
+    }
+
+    /* Restrict built-in functions */
+    PyRun_SimpleString(
+        "import builtins\n"
+        "allowed_builtins = {'print': print, 'len': len, 'range': range}\n"
+        "builtins.__dict__.clear()\n"
+        "builtins.__dict__.update(allowed_builtins)\n"
+    );
+}
+
 /* Register background worker on extension load */
 void
 _PG_init(void)
 {
-    if (!process_shared_preload_libraries_in_progress)
-        return;
-
-    /* Request shared memory space */
-    RequestAddinShmemSpace(sizeof(PandasSharedData));
-    RequestAddinLWLocks(1);
-
-    /* Register the background worker */
     BackgroundWorker worker;
     memset(&worker, 0, sizeof(BackgroundWorker));
-    strncpy(worker.bgw_name, "pg_pandas_worker", BGW_MAXLEN);
-    strncpy(worker.bgw_type, "pg_pandas_worker", BGW_MAXLEN);
+    worker.bgw_name = "pg_pandas_worker";
+    worker.bgw_type = "pg_pandas_worker";
     worker.bgw_flags = BGWORKER_SHMEM_ACCESS | BGWORKER_BACKEND_DATABASE_CONNECTION;
     worker.bgw_start_time = BgWorkerStart_RecoveryFinished;
     worker.bgw_main = pg_pandas_worker_main;
+    worker.bgw_shutdown = handle_shutdown;
     worker.bgw_restart_time = BGW_NEVER_RESTART;
 
     RegisterBackgroundWorker(&worker);
@@ -73,20 +106,25 @@ pg_pandas_worker_main(Datum main_arg)
         /* First time initialization */
         memset(pandas_shared, 0, sizeof(PandasSharedData));
         LWLockInitialize(&pandas_shared->lock, LWLockNewTrancheId());
+        pandas_shared->terminate = false;
     }
 
+    /* Set up signal handler for graceful shutdown */
+    pqsignal(SIGTERM, handle_shutdown);
+    BackgroundWorkerUnblockSignals();
+
     /* Initialize Python */
-    Py_Initialize();
-    PyRun_SimpleString("import pandas as pd");
-    PyRun_SimpleString("import psycopg2");
-    PyRun_SimpleString("import os");
-    PyRun_SimpleString("import json");
+    initialize_secure_python();
 
     /* Main loop */
     while (true)
     {
         /* Sleep to prevent busy waiting */
         pg_usleep(10000); /* Sleep for 10ms */
+
+        /* Check for termination signal */
+        if (pandas_shared->terminate)
+            break;
 
         /* Check if there is a new task */
         LWLockAcquire(&pandas_shared->lock, LW_SHARED);
@@ -127,32 +165,49 @@ pg_pandas_worker_main(Datum main_arg)
                  "print(result_json)\n",
                  data, operation);
 
-        /* Execute Python code and capture output */
-        FILE *fp = popen(pycode, "r");
-        if (fp == NULL)
+        /* Execute Python code */
+        PyObject *pModule = PyImport_AddModule("__main__");
+        PyObject *pDict = PyModule_GetDict(pModule);
+        PyObject *pResult;
+
+        /* Execute prepared Python code */
+        pResult = PyRun_String(pycode, Py_file_input, pDict, pDict);
+        if (pResult == NULL)
         {
-            strncpy(pandas_shared->result, "Error executing Python code.", sizeof(pandas_shared->result) - 1);
-            pandas_shared->result[sizeof(pandas_shared->result) - 1] = '\0';
-            pclose(fp);
+            PyErr_Print();
+            ereport(LOG, (errmsg("Error executing Python code.")));
+            /* Handle error: reset ready flag */
+            pandas_shared->ready = true;
             LWLockRelease(&pandas_shared->lock);
             continue;
         }
 
-        /* Read the result */
-        if (fgets(pandas_shared->result, sizeof(pandas_shared->result), fp) == NULL)
+        /* Retrieve result */
+        PyObject *pValue = PyObject_CallMethod(pModule, "print", "O", Py_None);
+        if (pValue == NULL)
         {
-            strncpy(pandas_shared->result, "Error reading Python output.", sizeof(pandas_shared->result) - 1);
-            pandas_shared->result[sizeof(pandas_shared->result) - 1] = '\0';
+            PyErr_Print();
+            ereport(LOG, (errmsg("Error retrieving Python code output.")));
         }
-        pclose(fp);
+        else
+        {
+            /* Convert result to C string */
+            const char *result_str = PyUnicode_AsUTF8(pValue);
+            if (result_str)
+            {
+                strncpy(pandas_shared->result, result_str, sizeof(pandas_shared->result) - 1);
+                pandas_shared->result[sizeof(pandas_shared->result) - 1] = '\0';
+            }
+            Py_DECREF(pValue);
+        }
 
-        /* Set ready flag */
+        Py_DECREF(pResult);
+
+        /* Set ready flag and release lock */
         pandas_shared->ready = true;
-
-        /* Release lock */
         LWLockRelease(&pandas_shared->lock);
     }
 
-    /* Finalize Python (unreachable in current loop) */
+    /* Finalize Python */
     Py_Finalize();
 }

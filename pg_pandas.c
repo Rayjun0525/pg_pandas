@@ -12,100 +12,85 @@
 #include "executor/spi.h"
 #include "storage/ipc.h"
 #include "storage/shmem.h"
-#include "storage/proc.h"
+#include "storage/lwlock.h"
 #include "miscadmin.h"
 
 #include <string.h>
 
 PG_MODULE_MAGIC;
 
-/* Forward declaration for worker communication */
-Datum pg_pandas_fn(PG_FUNCTION_ARGS);
-PG_FUNCTION_INFO_V1(pg_pandas_fn);
-
-/* Shared memory structure for communication */
 typedef struct {
     char data[8192];
     char operation[2048];
     char result[65536];
     bool ready;
+    bool terminate;
     LWLock lock;
 } PandasSharedData;
 
-/* Pointer to shared memory */
 static PandasSharedData *pandas_shared = NULL;
+int pg_pandas_parallel = 1;  /* Default value */
 
-/* Function to communicate with background worker */
+void _PG_init(void);
+Datum pg_pandas_fn(PG_FUNCTION_ARGS);
+PG_FUNCTION_INFO_V1(pg_pandas_fn);
+
+/* Initialize configuration parameters */
+void
+_PG_init(void)
+{
+    DefineCustomIntVariable("pg_pandas.parallel",
+                            "Number of parallel pg_pandas workers",
+                            "Sets the number of parallel workers for pg_pandas.",
+                            &pg_pandas_parallel,
+                            1,
+                            1,
+                            1024, /* Set maximum to 1024 */
+                            PGC_POSTMASTER,
+                            0,
+                            NULL, NULL, NULL);
+
+    /* Allocate shared memory */
+    pq_init_shared_memory();
+
+    if (!process_shared_preload_libraries_in_progress)
+    {
+        elog(ERROR, "pg_pandas must be loaded via shared_preload_libraries");
+    }
+
+    if (pg_pandas_parallel < 1 || pg_pandas_parallel > 16)
+    {
+        elog(ERROR, "pg_pandas.parallel must be between 1 and 16");
+    }
+
+    /* Initialize shared memory */
+    bool found;
+    pandas_shared = (PandasSharedData *) ShmemInitStruct("pg_pandas_shared",
+                                                         sizeof(PandasSharedData),
+                                                         &found);
+
+    if (!found)
+    {
+        /* Initialize shared memory */
+        memset(pandas_shared, 0, sizeof(PandasSharedData));
+        LWLockInitialize(&pandas_shared->lock, LWLockNewTrancheId());
+    }
+}
+
+/* Function to execute Pandas operations */
 Datum
 pg_pandas_fn(PG_FUNCTION_ARGS)
 {
     FuncCallContext *funcctx;
-    TupleDesc        tupdesc;
-    AttInMetadata   *attinmeta;
+    MemoryContext oldcontext;
 
     if (SRF_IS_FIRSTCALL())
     {
-        MemoryContext oldcontext;
-        text *op_t = PG_GETARG_TEXT_P(1);
-        Datum input = PG_GETARG_DATUM(0);
-
-        /* Convert operation text to C string */
-        char *operation = text_to_cstring(op_t);
-
-        /* Convert input data to JSON */
-        char *json_data = NULL;
-        Oid input_type = get_fn_expr_argtype(fcinfo->flinfo, 0);
-
-        if (input_type == RECORDOID)
-        {
-            /* Handle record input */
-            TupleDesc input_tupdesc = get_call_result_type(fcinfo, NULL, &tupdesc);
-            if (!input_tupdesc)
-                ereport(ERROR, (errmsg("Failed to get input tuple descriptor")));
-
-            json_data = DatumGetCString(DirectFunctionCall1(row_to_json, input));
-        }
-        else
-        {
-            /* Convert scalar value to JSON */
-            json_data = DatumGetCString(DirectFunctionCall1(to_json, input));
-        }
-
+        /* Switch to multi-call memory context */
         funcctx = SRF_FIRSTCALL_INIT();
-        oldcontext = MemoryContextSwitchTo(funcctx->multi_call_memory_ctx);
 
-        /* Send request to worker */
-        LWLockAcquire(&pandas_shared->lock, LW_EXCLUSIVE);
-        strncpy(pandas_shared->data, json_data, sizeof(pandas_shared->data) - 1);
-        pandas_shared->data[sizeof(pandas_shared->data) - 1] = '\0';
-        strncpy(pandas_shared->operation, operation, sizeof(pandas_shared->operation) - 1);
-        pandas_shared->operation[sizeof(pandas_shared->operation) - 1] = '\0';
-        pandas_shared->ready = true;
-        LWLockRelease(&pandas_shared->lock);
-
-        /* Wait for worker to process */
-        while (true)
-        {
-            LWLockAcquire(&pandas_shared->lock, LW_SHARED);
-            bool processed = pandas_shared->ready;
-            LWLockRelease(&pandas_shared->lock);
-
-            if (!processed)
-                break;
-
-            /* Check if result is ready */
-            LWLockAcquire(&pandas_shared->lock, LW_SHARED);
-            bool ready = pandas_shared->ready;
-            LWLockRelease(&pandas_shared->lock);
-
-            if (ready)
-                break;
-
-            CHECK_FOR_INTERRUPTS();
-            pg_usleep(10000); /* Sleep for 10ms */
-        }
-
-        /* Parse JSON result from worker */
+        /* Allocate a tuple descriptor for result */
+        TupleDesc tupdesc;
         if (get_call_result_type(fcinfo, NULL, &tupdesc) != TYPEFUNC_COMPOSITE)
         {
             ereport(ERROR,
@@ -113,46 +98,80 @@ pg_pandas_fn(PG_FUNCTION_ARGS)
                      errmsg("function returning record called in context that cannot accept type record")));
         }
 
-        attinmeta = TupleDescGetAttInMetadata(tupdesc);
-        funcctx->attinmeta = attinmeta;
+        funcctx->tuple_desc = BlessTupleDesc(tupdesc);
+        funcctx->max_calls = 1;
 
-        /* Parse JSON and store in user_fctx */
-        /* Implement JSON parsing here if necessary */
-
-        MemoryContextSwitchTo(oldcontext);
-    }
-
-    funcctx = SRF_PERCALL_SETUP();
-
-    if (funcctx->call_cntr < 1) /* Assuming single row result for simplicity */
-    {
-        AttInMetadata *attinmeta = funcctx->attinmeta;
-
-        /* Create tuple from JSON result */
-        HeapTuple tuple;
-        Datum result;
-        bool isnull;
-        Datum *values;
-        int ncols = tupdesc->natts;
-
-        values = palloc(sizeof(Datum) * ncols);
-
-        for (int i = 0; i < ncols; i++)
+        /* Setup shared memory and lock */
+        if (pandas_shared == NULL)
         {
-            Form_pg_attribute attr = TupleDescAttr(tupdesc, i);
-            char *colname = NameStr(attr->attname);
-            /* For simplicity, assume all columns are text */
-            values[i] = CStringGetTextDatum(pandas_shared->result);
-            isnull = false;
+            ereport(ERROR, (errmsg("Shared memory not initialized")));
         }
 
-        tuple = BuildTupleFromCStrings(attinmeta, (char **)values);
-        result = HeapTupleGetDatum(tuple);
+        /* Acquire lock */
+        LWLockAcquire(&pandas_shared->lock, LW_EXCLUSIVE);
 
+        /* Check if worker is ready */
+        if (!pandas_shared->ready)
+        {
+            LWLockRelease(&pandas_shared->lock);
+            ereport(ERROR, (errmsg("pg_pandas worker is busy")));
+        }
+
+        /* Get input arguments */
+        Datum input_data = PG_GETARG_DATUM(0);
+        text *operation_text = PG_GETARG_TEXT_P(1);
+
+        /* Serialize input data and operation to shared memory */
+        size_t data_len = VARSIZE_ANY_EXHDR(input_data);
+        size_t operation_len = VARSIZE_ANY_EXHDR(operation_text);
+
+        if (data_len >= sizeof(pandas_shared->data))
+        {
+            LWLockRelease(&pandas_shared->lock);
+            ereport(ERROR, (errmsg("Input data size exceeds buffer capacity")));
+        }
+
+        if (operation_len >= sizeof(pandas_shared->operation))
+        {
+            LWLockRelease(&pandas_shared->lock);
+            ereport(ERROR, (errmsg("Operation size exceeds buffer capacity")));
+        }
+
+        memcpy(pandas_shared->data, VARDATA_ANY(input_data), data_len);
+        memcpy(pandas_shared->operation, VARDATA_ANY(operation_text), operation_len);
+        pandas_shared->ready = false;
+
+        /* Signal worker to process */
+        LWLockRelease(&pandas_shared->lock);
+    }
+
+    /* Per-call state */
+    funcctx = SRF_PERCALL_SETUP();
+
+    if (funcctx->call_cntr < 1)
+    {
+        /* Acquire lock to read result */
+        LWLockAcquire(&pandas_shared->lock, LW_SHARED);
+
+        if (!pandas_shared->ready)
+        {
+            LWLockRelease(&pandas_shared->lock);
+            ereport(ERROR, (errmsg("pg_pandas operation not completed")));
+        }
+
+        /* Prepare result tuple */
+        Datum result;
+        bool isnull = false;
+        result = CStringGetTextDatum(pandas_shared->result);
+
+        LWLockRelease(&pandas_shared->lock);
+
+        /* Return result */
         SRF_RETURN_NEXT(funcctx, result);
     }
     else
     {
+        /* No more results */
         SRF_RETURN_DONE(funcctx);
     }
 }

@@ -40,6 +40,28 @@ echo "Found pg_config at $PG_CONFIG."
 PG_VERSION=$($PG_CONFIG --version)
 echo "PostgreSQL version: $PG_VERSION"
 
+# Determine postgresql.conf path using environment variable or command-line argument
+if [ -n "$PGCONF" ]; then
+    POSTGRESQL_CONF="$PGCONF"
+elif [ -n "$1" ]; then
+    POSTGRESQL_CONF="$1/postgresql.conf"
+else
+    if [ -z "$PGDATA" ]; then
+        echo "Error: PGDATA environment variable is not set and no configuration path provided."
+        exit 1
+    fi
+    POSTGRESQL_CONF="$PGDATA/postgresql.conf"
+fi
+
+# Read pg_pandas.parallel from postgresql.conf
+PG_PANDAS_PARALLEL=$(grep "^pg_pandas.parallel" "$POSTGRESQL_CONF" | awk -F '=' '{print $2}' | tr -d ' ')
+
+if [ -z "$PG_PANDAS_PARALLEL" ]; then
+    PG_PANDAS_PARALLEL=1
+fi
+
+echo "pg_pandas.parallel set to $PG_PANDAS_PARALLEL."
+
 # Generate Makefile
 echo "Generating Makefile..."
 cat <<EOF > Makefile
@@ -55,6 +77,9 @@ include \$(PGXS)
 # Link against Python library
 SHLIB_LINK = -lpython3
 CFLAGS += -I/usr/include/python3
+
+# Set parallel workers
+CPPFLAGS += -DPG_PANDAS_PARALLEL=$PG_PANDAS_PARALLEL
 EOF
 
 echo "Makefile generated successfully."
