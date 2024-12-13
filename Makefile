@@ -8,8 +8,9 @@ PGXS := $(shell $(PG_CONFIG) --pgxs)
 include $(PGXS)
 
 # Link against Python library using python3-config
-PYTHON_INCLUDE = $(shell python3-config --includes)
-PYTHON_LIBS = $(shell python3-config --ldflags)
+PYTHON_CONFIG ?= python3.9-config
+PYTHON_INCLUDE = $(shell $(PYTHON_CONFIG) --includes)
+PYTHON_LIBS = $(shell $(PYTHON_CONFIG) --ldflags)
 
 CFLAGS += $(PYTHON_INCLUDE)
 LDFLAGS += $(PYTHON_LIBS)
