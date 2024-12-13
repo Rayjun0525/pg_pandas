@@ -88,7 +88,7 @@ You can use the `pandas` function to apply Pandas operations on SQL query result
     SELECT * FROM pandas(
       (SELECT * FROM sales_data),
       'lambda df: df.groupby("region").sum().reset_index()'
-    ) AS t(region text, total_sales float8);
+    ) AS t(total_sales float8);
     ```
 
 2. **Dataframe Merging**
@@ -96,7 +96,7 @@ You can use the `pandas` function to apply Pandas operations on SQL query result
     SELECT * FROM pandas(
       (SELECT * FROM table1),
       'lambda df1: df1.merge(pd.read_json(\'[{"id": 1, "extra": "A"}, {"id": 2, "extra": "B"}]\'), on="id")'
-    ) AS t(id int, column1 text, extra text);
+    ) AS t(column1 text, extra text);
     ```
 
 3. **Time Series Resampling**
@@ -104,7 +104,7 @@ You can use the `pandas` function to apply Pandas operations on SQL query result
     SELECT * FROM pandas(
       (SELECT timestamp, value FROM timeseries_data),
       'lambda df: df.set_index("timestamp").resample("1D").sum().reset_index()'
-    ) AS t(timestamp timestamp, total_value float8);
+    ) AS t(total_value float8);
     ```
 
 ---
